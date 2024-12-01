@@ -1,3 +1,6 @@
+# Ignore our data folder and all its contents.
+/data/*
+
 .Rproj.user
 .Rhistory
 .RData
