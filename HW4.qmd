@@ -28,17 +28,17 @@ suppressMessages(library(sf))
 set.seed(123)
 
 # Load SST raster stack
-sst_rasters <- rast(list.files(
+sst_raster_stack <- rast(list.files(
   path = here("data"),
   pattern = "average_annual_sst_.*\\.tif$",
   full.names = TRUE
 ))
 
 # Load bathymetry raster
-depth_raster <- rast(here("data", "depth.tif"))
+bathymetry_raster <- rast(here("data", "depth.tif"))
 
 # Load EEZ shapefile
-eez_shapefile <- vect(here("data", "wc_regions_clean.shp"))
+eez_shape <- vect(here("data", "wc_regions_clean.shp"))
 ```
 
 ## Data Preparation
@@ -46,46 +46,29 @@ eez_shapefile <- vect(here("data", "wc_regions_clean.shp"))
 ### Reproject Data
 
 ```{r}
-# Define target CRS
-target_crs <- "+proj=utm +zone=10 +datum=WGS84 +units=m +no_defs"
+# Define UTM Zone 10N CRS
+utm_crs <- "+proj=utm +zone=10 +datum=WGS84 +units=m +no_defs"
 
 # Reproject datasets
-sst_rasters_aligned <- project(sst_rasters, target_crs)
-depth_raster_aligned <- project(depth_raster, target_crs)
-eez_shapefile_aligned <- project(eez_shapefile, target_crs)
+sst_raster_projected <- project(sst_raster_stack, utm_crs)
+bathymetry_projected <- project(bathymetry_raster, utm_crs)
+eez_shape_projected <- project(eez_shape, utm_crs)
 ```
 
-### Calculate Mean SST
+### Calculate Mean SST and Convert to Celsius
 
 ```{r}
-# Mean SST (2008-2012) and conversion to Celsius
-sst_mean <- mean(sst_rasters_aligned)
-sst_mean_celsius <- sst_mean - 273.15
+# Mean SST (2008-2012)
+sst_mean <- mean(sst_raster_projected)
+sst_mean_celsius <- sst_mean - 273.15  # Convert from Kelvin to Celsius
 ```
 
 ### Prepare Depth Data
 
 ```{r}
-# Crop and resample depth raster to match SST
-depth_cropped <- crop(depth_raster_aligned, ext(sst_mean_celsius))
-depth_resampled <- resample(depth_cropped, sst_mean_celsius, method = "near")
-```
-
-### Data Check
-
-```{r}
-# Display resolution and extent checks
-tibble(
-  Dataset = c("SST", "Depth"),
-  X_Resolution = c(res(sst_mean_celsius)[1], res(depth_resampled)[1]),
-  Y_Resolution = c(res(sst_mean_celsius)[2], res(depth_resampled)[2]),
-  X_Extent = c(ext(sst_mean_celsius)[1], ext(depth_resampled)[1]),
-  Y_Extent = c(ext(sst_mean_celsius)[2], ext(depth_resampled)[2]),
-  Width_Extent = c(ext(sst_mean_celsius)[3], ext(depth_resampled)[3]),
-  Height_Extent = c(ext(sst_mean_celsius)[4], ext(depth_resampled)[4])
-) %>%
-  kable("html", caption = "Resolution and Extent Checks") %>%
-  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F)
+# Align bathymetry raster with SST extent and resolution
+bathymetry_cropped <- crop(bathymetry_projected, ext(sst_mean_celsius))
+bathymetry_resampled <- resample(bathymetry_cropped, sst_mean_celsius, method = "near")
 ```
 
 ## Suitability Analysis for Oysters
@@ -94,185 +77,171 @@ tibble(
 
 ```{r}
 # Define suitability ranges for oysters
-min_sst <- 11  # Minimum suitable SST
-max_sst <- 30  # Maximum suitable SST
-min_depth <- 0  # Minimum suitable depth
-max_depth <- 70  # Maximum suitable depth
+min_sst <- 11  # Minimum SST in Celsius
+max_sst <- 30  # Maximum SST in Celsius
+min_depth <- 0  # Minimum depth in meters
+max_depth <- 70  # Maximum depth in meters
 
 # SST suitability classification
-sst_classification <- matrix(
-  c(-Inf, min_sst, 0,    # Below minimum SST -> unsuitable
-    min_sst, max_sst, 1,  # Within range -> suitable
-    max_sst, Inf, 0),     # Above maximum SST -> unsuitable
-  ncol = 2, byrow = TRUE  # Changed from 2 to 3
+sst_reclass_matrix <- matrix(
+  c(-Inf, min_sst, 0, min_sst, max_sst, 1, max_sst, Inf, 0),
+  ncol = 3, byrow = TRUE
 )
-sst_suitability <- classify(sst_mean_celsius, rcl = sst_classification)
+sst_suitability <- classify(sst_mean_celsius, rcl = sst_reclass_matrix)
 
 # Depth suitability classification
-depth_classification <- matrix(
-  c(-Inf, min_depth, 0,     # Below minimum depth -> unsuitable
-    min_depth, max_depth, 1,  # Within range -> suitable
-    max_depth, Inf, 0),        # Above maximum depth -> unsuitable
-  ncol = 2, byrow = TRUE  # Changed from 2 to 3
+depth_reclass_matrix <- matrix(
+  c(-Inf, min_depth, 0, min_depth, max_depth, 1, max_depth, Inf, 0),
+  ncol = 3, byrow = TRUE
 )
-depth_suitability <- classify(depth_resampled, rcl = depth_classification)
+depth_suitability <- classify(bathymetry_resampled, rcl = depth_reclass_matrix)
 ```
 
 ### Zonal Analysis
 
 ```{r}
 # Combine SST and Depth suitability
-combined_suitability <- sst_suitability * depth_suitability
+combined_habitat_suitability <- sst_suitability * depth_suitability
 
-# Fix raster extent to align with shapefile
-combined_suitability <- extend(combined_suitability, ext(eez_shapefile_aligned))
+# Rasterize EEZ shapefile for zonal analysis
+eez_raster <- rasterize(eez_shape_projected, combined_habitat_suitability, field = "rgn_id")
 
-# Crop and mask raster to EEZ shapefile
-combined_suitability <- crop(combined_suitability, eez_shapefile_aligned)
-combined_suitability <- mask(combined_suitability, eez_shapefile_aligned)
+# Summarize total suitable area by EEZ region
+habitat_suitability_by_eez <- zonal(combined_habitat_suitability, eez_raster, fun = "sum", na.rm = TRUE)
 
-# Verify extents
-print(ext(combined_suitability))
-print(ext(eez_shapefile_aligned))
+# Rename columns for clarity
+colnames(habitat_suitability_by_eez) <- c("region_id", "total_suitable_area")
+```
 
-# Rasterize EEZ shapefile using 'rgn_id' as the zone field
-eez_rasterized <- rasterize(eez_shapefile_aligned, combined_suitability, field = "rgn_id")
+### Visualize Suitability
 
-# Verify rasterization
-print("Unique values in eez_rasterized:")
-print(unique(values(eez_rasterized)))
+```{r}
+# SST Suitability Map
+plot(sst_suitability, main = "SST Suitability", col = c("white", "darkgreen"))
 
-# Perform zonal analysis
-suitability_by_eez <- zonal(combined_suitability, eez_rasterized, fun = "sum", na.rm = TRUE)
+# Depth Suitability Map
+plot(depth_suitability, main = "Depth Suitability", col = c("white", "blue"))
 
-# Check the structure of the zonal output
-print("Zonal Analysis Output:")
-print(head(suitability_by_eez))
+# Combined Suitability Map
+plot(combined_habitat_suitability, main = "Combined Habitat Suitability", col = c("white", "red"))
+#plot(eez_shape_projected, add = TRUE, border = "black", lwd = 0.1)
 
-# Rename the zone column for clarity
-colnames(suitability_by_eez) <- c("rgn_id", "sum")
-
-# Take the absolute value of the suitability sums to remove negative values
-suitability_by_eez$sum <- abs(suitability_by_eez$sum)
-
-# Calculate the area of each grid cell
-cell_area <- prod(res(combined_suitability))  # Each grid cell's area in m²
-
-# Initialize Total_Area in shapefile
-eez_shapefile_aligned$Total_Area <- NA
-
-# Match rgn_id between the shapefile and zonal results
-matching_indices <- match(eez_shapefile_aligned$rgn_id, suitability_by_eez$rgn_id)
-
-# Populate Total_Area using the matched indices
-eez_shapefile_aligned$Total_Area <- suitability_by_eez$sum[matching_indices] * cell_area
-
-# Assign 0 to unmatched IDs
-eez_shapefile_aligned$Total_Area[is.na(eez_shapefile_aligned$Total_Area)] <- 0
-
-# Verify results
-print("First few Total_Area values (m²):")
-print(head(eez_shapefile_aligned$Total_Area))
+print("Zonal Analysis Results:")
+print(habitat_suitability_by_eez)
 ```
 
 ## General Function for Suitability Analysis
 
 ```{r}
-calculate_suitability <- function(min_sst, max_sst, min_depth, max_depth, species_name) {
-  # Error handling
-  if(min_sst >= max_sst) {
-    stop("Minimum SST must be less than Maximum SST.")
-  }
+calculate_habitat_suitability <- function(sst_stack, bathymetry, eez_shapefile, 
+                                          sst_min, sst_max, depth_min, depth_max, species_name) {
+  # Reproject data to UTM Zone 10N CRS
+  utm_crs <- "+proj=utm +zone=10 +datum=WGS84 +units=m +no_defs"
+  sst_projected <- project(sst_stack, utm_crs)
+  bathymetry_projected <- project(bathymetry, utm_crs)
+  eez_projected <- project(eez_shapefile, utm_crs)
   
-  if(min_depth >= max_depth) {
-    stop("Minimum Depth must be less than Maximum Depth.")
-  }
+  # Calculate mean SST and convert to Celsius
+  sst_mean <- mean(sst_projected)
+  sst_celsius <- sst_mean - 273.15
   
-  # Reclassification matrices
-  sst_classification <- matrix(
-    c(-Inf, min_sst, 0,  # Below minimum SST -> unsuitable
-      min_sst, max_sst, 1,  # Within range -> suitable
-      max_sst, Inf, 0),  # Above maximum SST -> unsuitable
-    ncol = 3, byrow = TRUE  # Ensure 3 columns
+  # Crop and resample bathymetry raster
+  bathymetry_cropped <- crop(bathymetry_projected, ext(sst_celsius))
+  bathymetry_resampled <- resample(bathymetry_cropped, sst_celsius, method = "near")
+  
+  # Reclassify SST suitability
+  sst_reclass <- matrix(
+    c(-Inf, sst_min, 0, sst_min, sst_max, 1, sst_max, Inf, 0),
+    ncol = 3, byrow = TRUE
   )
+  sst_suitability <- classify(sst_celsius, rcl = sst_reclass)
   
-  depth_classification <- matrix(
-    c(-Inf, min_depth, 0,  # Below minimum depth -> unsuitable
-      min_depth, max_depth, 1,  # Within range -> suitable
-      max_depth, Inf, 0),  # Above maximum depth -> unsuitable
-    ncol = 3, byrow = TRUE  # Ensure 3 columns
+  # Reclassify depth suitability
+  depth_reclass <- matrix(
+    c(-Inf, depth_min, 0, depth_min, depth_max, 1, depth_max, Inf, 0),
+    ncol = 3, byrow = TRUE
   )
+  depth_suitability <- classify(bathymetry_resampled, rcl = depth_reclass)
   
-  # Reclassify SST and Depth
-  sst_suitability_func <- classify(sst_mean_celsius, rcl = sst_classification)
-  depth_suitability_func <- classify(depth_resampled, rcl = depth_classification)
-  
-  # Combine suitability
-  combined_suitability_func <- sst_suitability_func * depth_suitability_func
-  
-  # Rasterize EEZ shapefile using 'rgn_id' as the zone field
-  eez_rasterized_func <- rasterize(eez_shapefile_aligned, combined_suitability_func, field = "rgn_id")
-  
-  # Verify rasterization within function
-  print("Unique values in eez_rasterized_func:")
-  print(unique(values(eez_rasterized_func)))
+  # Combine SST and depth suitability
+  combined_suitability <- sst_suitability * depth_suitability
   
   # Perform zonal analysis
-  suitability_by_eez_func <- zonal(combined_suitability_func, eez_rasterized_func, fun = "sum", na.rm = TRUE)
+  eez_raster <- rasterize(eez_projected, combined_suitability, field = "rgn_id")
+  zonal_results <- zonal(combined_suitability, eez_raster, fun = "sum", na.rm = TRUE)
   
-  # Check the structure of the zonal output
-  print("Zonal Analysis Output within Function:")
-  print(head(suitability_by_eez_func))
+  # Rename columns for clarity
+  colnames(zonal_results) <- c("region_id", "total_suitable_area")
   
-  # Rename the zone column appropriately
-  colnames(suitability_by_eez_func) <- c("rgn_id", "sum")
+  # Plot SST Suitability
+  plot(
+    sst_suitability,
+    main = paste(species_name, "SST Suitability"),
+    col = c("white", "darkgreen"),
+    legend.args = list(text = "Suitability", side = 4, line = 2.5)
+  )
   
-  # Take the absolute value of the suitability sums to remove negative values
-  suitability_by_eez_func$sum <- abs(suitability_by_eez_func$sum)
-  
-  # Calculate the area of each grid cell
-  cell_area_func <- prod(res(combined_suitability_func))  # Each grid cell's area in m²
-  
-  # Calculate Total_Area
-  suitability_by_eez_func <- suitability_by_eez_func %>%
-    mutate(Total_Area = sum * cell_area_func)
-  
-  # Merge with EEZ shapefile
-  eez_with_area <- eez_shapefile_aligned %>%
-    as.data.frame() %>%
-    left_join(suitability_by_eez_func, by = "rgn_id") %>%
-    mutate(Total_Area = ifelse(is.na(Total_Area), 0, Total_Area))
+  # Plot Depth Suitability
+  plot(
+    depth_suitability,
+    main = paste(species_name, "Depth Suitability"),
+    col = c("white", "blue"),
+    legend.args = list(text = "Suitability", side = 4, line = 2.5)
+  )
   
   # Plot Combined Suitability
-  terra::plot(combined_suitability_func, 
-             main = paste("Combined Suitability for", species_name), 
-             col = c("lightgray", "blue", "green"), 
-             legend = TRUE, 
-             xlab = "Longitude", 
-             ylab = "Latitude")
-  terra::plot(eez_shapefile_aligned, 
-             add = TRUE, 
-             border = "red", 
-             lwd = 2)
-  legend("bottomright", 
-         legend = c("No Data", "Unsuitable", "Suitable"), 
-         fill = c("lightgray", "blue", "green"), 
-         border = "black")
-  
-  # Return table for inline display
-  return(
-    eez_with_area %>%
-      select(rgn_id, Total_Area) %>%
-      kable("html", caption = paste("Suitability by EEZ for", species_name)) %>%
-      kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+  plot(
+    combined_suitability,
+    main = paste(species_name, "Combined Suitability"),
+    col = c("white", "red"),
+    legend.args = list(text = "Suitability", side = 4, line = 2.5)
   )
+  #plot(eez_projected, add = TRUE, border = "black", lwd = 0.1)
+  
+  # Print and return results
+  print(paste(species_name, "Habitat Suitability Results:"))
+  print(zonal_results)
+  return(zonal_results)
 }
 ```
 
 ```{r}
-calculate_suitability(11, 30, 0, 70, "Squid")
+# Parameters for Squid
+species_name <- "Squid"
+suitable_sst_min <- 8  # Minimum SST for squid
+suitable_sst_max <- 13 # Maximum SST for squid
+suitable_depth_min <- 20  # Minimum depth for squid
+suitable_depth_max <- 180 # Maximum depth for squid
+
+# Run Suitability Function
+squid_suitability <- calculate_habitat_suitability(
+  sst_stack = sst_raster_stack,
+  bathymetry = bathymetry_raster,
+  eez_shapefile = eez_shape,
+  sst_min = suitable_sst_min,
+  sst_max = suitable_sst_max,
+  depth_min = suitable_depth_min,
+  depth_max = suitable_depth_max,
+  species_name = species_name
+)
 ```
 
 ## Reflection
 
-This assignment demonstrates the critical workflow for analyzing potential aquaculture zones. The general function provides flexibility for analyzing other species with different environmental constraints.
+This assignment was all about figuring out where oysters could live based on 
+their habitat needs. Using sea surface temperature (SST) and depth data, 
+I calculated where the conditions were suitable. The results showed that about 
+93.9% of the area had the right SST (11–30°C), which wasn't surprising since 
+most coastal waters meet this range. However, only 2.1% of the area had the 
+right depth (0–70m), making the combined suitability really sparse at just 
+0.057% of the total area.
+
+Even though the combined suitability was low, this makes sense for oysters, 
+since they live in shallow coastal areas. It worked well to highlight 
+the regions along the coast that meet both SST and depth conditions. These 
+areas are the most promising for oyster aquaculture.
+
+We also made a generalized function to make the same analysis for other species. 
+For example, when I used the ranges for squid (SST: 8–13°C, Depth: 20–180m), 
+the results showed different suitable areas, which makes sense because squid 
+have different habitat needs.
