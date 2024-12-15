@@ -112,7 +112,7 @@ zonal_results <- zonal(combined_suitability, eez_raster, fun = "sum", na.rm = TR
 # Calculate cell grid
 cell_area <- res(combined_suitability)[1] * res(combined_suitability)[2]
 
-# Multiply by cell area to get the total area (assuming suitable locations have values 1)
+# Multiply by cell area to get the total area 
 total_cell_area <- zonal_results[,2] * cell_area
 
 # Rename columns for clarity
@@ -173,8 +173,9 @@ legend(
 # Reset margins to default
 par(mar = c(5, 4, 4, 2))
 
+eez_shape$Total_Area <- total_cell_area
 print(paste(species_name, "Zonal Results:"))
-print(total_cell_area)
+print(head(eez_shape@data[, c("rgn_id", "Total_Area")]))
 ```
 
 ## General Function for Suitability Analysis
@@ -218,7 +219,7 @@ calculate_habitat_suitability <- function(sst_raster_stack, bathymetry_raster, e
   # Calculate cell grid
   cell_area <- res(combined_suitability)[1] * res(combined_suitability)[2]
   
-  # Multiply by cell area to get the total area (assuming suitable locations have values 1)
+  # Multiply by cell area to get the total area
   total_cell_area <- zonal_results[,2] * cell_area
   
   # Rename columns for clarity
@@ -277,8 +278,9 @@ calculate_habitat_suitability <- function(sst_raster_stack, bathymetry_raster, e
 
   
   # Print and return results
+  eez_shape$Total_Area <- total_cell_area
   print(paste(species_name, "Zonal Results:"))
-  print(total_cell_area)
+  print(head(eez_shape@data[, c("rgn_id", "Total_Area")]))
   return(total_cell_area)
 }
 ```
