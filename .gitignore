@@ -1,5 +1,6 @@
 # Ignore our data folder and all its contents.
 data/
+HW4_cache/
 
 .Rproj.user
 .Rhistory
